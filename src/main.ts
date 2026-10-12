@@ -7,6 +7,7 @@ import { HandTracking } from './tracking';
 import { GestureEngine, clamp, type Hand, type GestureFrame } from './gestures';
 import { QUALITY, PALETTES, type Quality, type Palette } from './config';
 createUI();
+if(innerWidth<=800)hideControls(true);
 const events=new AbortController();const signal=events.signal;
 const sim=new ParticleSimulation();const engine=new GestureEngine();
 let renderer:ParticleRenderer|undefined;
@@ -82,10 +83,11 @@ on($('count'),'input',()=>{sim.count=Number($<HTMLInputElement>('count').value);
 on($('strength'),'input',()=>{sim.strength=Number($<HTMLInputElement>('strength').value);$('strength-label').textContent=`${sim.strength.toFixed(1)}×`;});
 on($('bloom'),'input',()=>{const value=Number($<HTMLInputElement>('bloom').value);if(renderer)renderer.bloomIntensity=value;$('bloom-label').textContent=`${Math.round(value*100)}%`;});
 on($('preview-toggle'),'change',previewUI);
+on($('indicator-toggle'),'change',()=>{$('rings').hidden=!$<HTMLInputElement>('indicator-toggle').checked;});
 on($('debug-toggle'),'change',()=>{$('debug').hidden=!$<HTMLInputElement>('debug-toggle').checked;$('landmarks').hidden=$('debug').hidden;});
 on($('reset'),'click',()=>{sim.reset();sim.mouseScale=1;engine.reset();});
 on($('fullscreen'),'click',()=>{void fullscreen();});
-on($('hide'),'click',()=>hideControls(true));on($('show'),'click',()=>hideControls(false));
+on($('hide'),'click',()=>hideControls(true));on($('show'),'click',()=>hideControls(!$('controls').hidden));
 function burst(){let dx=mouse.vx,dy=mouse.vy;const length=Math.hypot(dx,dy);if(length<.05){dx=1;dy=0;}else{dx/=length;dy/=length;}sim.burst({x:mouse.x,y:mouse.y,dx,dy,strength:2,age:0});}
 on($('burst'),'click',burst);
 const stage=$('stage');
@@ -126,8 +128,8 @@ function loop(now:number){
   }
   if(now-lastUI>300){
     lastUI=now;
-    if(mode==='camera') {const n=engine.frame.hands.filter(h=>now-h.lastSeen<220).length;setStatus(n===0?'No hands detected':n===1?'One hand detected':'Two hands detected',true);}
-    if(!$('debug').hidden){const hands=frame.hands.filter(h=>h.weight>.1);$('debug').textContent=`FPS ${Math.round(fps)} · Particles ${sim.count.toLocaleString()}\nInference ${tracking?.rate.toFixed(1)??'0'} Hz · ${tracking?.backend??mode}\n${frame.two.active?'Two hands: scale '+frame.two.scale.toFixed(2)+'×\n':''}${hands.map(h=>`${h.label} #${h.id}: ${h.mode} · handedness ${(h.confidence*100).toFixed(0)}%\nOpen ${h.openness.toFixed(2)} · Pinch ${h.pinch.toFixed(2)}`).join('\n')}\nConfidence is handedness classification, not landmark certainty.`;}
+    if(mode==='camera') {const n=engine.frame.hands.filter(h=>engine.isPresent(h,now)).length;setStatus(n===0?'No hands detected':n===1?'One hand detected':'Two hands detected',true);}
+    if(!$('debug').hidden){const hands=frame.hands.filter(h=>h.weight>.1);$('debug').textContent=`FPS ${Math.round(fps)} · Particles ${sim.count.toLocaleString()}\nInference ${tracking?.rate.toFixed(1)??'0'} Hz · ${tracking?.backend??mode}\nLatency ${tracking?.latency.toFixed(0)??'0'} ms · Tracking grace ${engine.lossTimeoutMs.toFixed(0)} ms\n${frame.two.active?'Two hands: scale '+frame.two.scale.toFixed(2)+'×\n':''}${hands.map(h=>`${h.label} #${h.id}: ${h.mode} · handedness ${(h.confidence*100).toFixed(0)}%\nOpen ${h.openness.toFixed(2)} · Pinch ${h.pinch.toFixed(2)}`).join('\n')}\nConfidence is handedness classification, not landmark certainty.`;}
   }
 }
 if(renderer){applyQuality('Auto');raf=requestAnimationFrame(loop);}

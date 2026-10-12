@@ -4,12 +4,15 @@ export const GESTURE = {
   openEnter: 0.86, openExit: 0.69,
   // A fully extended palm releases immediately; partial gestures retain hysteresis.
   fastOpenEnter: 0.93,
-  stabilityMs: 90, lostMs: 220, matchDistance: 0.38,
+  // Three clearly extended fingers can qualify despite one foreshortened finger.
+  openFingerScore: 0.85, openFingerMean: 0.70,
+  closedEnter: 0.18, closedExit: 0.32,
+  stabilityMs: 90, lostMs: 450, maxLostMs: 900, releaseWindowMs: 1200, matchDistance: 0.38,
   smoothingSeconds: 0.055, swipeSpeed: 1.65, swipeCooldownMs: 850,
   twoMinScale: 0.55, twoMaxScale: 1.85,
 };
-/** Fast release restores the initial cloud through motion, without teleporting particles. */
-export const SCATTER = {duration:0.48, radius:5.5, speed:28, response:35, targetPull:12};
+/** A brief outward velocity envelope; no fixed destination or position reset. */
+export const SCATTER = {duration:0.6, radius:5.5, speed:24, response:18};
 export const MAX_PARTICLES = 18000;
 export const QUALITY = {
   Low: {count:3500, ratio:1, bloom:false},

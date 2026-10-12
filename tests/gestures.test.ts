@@ -28,11 +28,17 @@ describe('hand measurements and coordinate mapping',()=>{
   });
 });
 describe('gesture state and arbitration',()=>{
-  it('holds pinch through its hysteresis band, then releases after stability',()=>{
+  it('holds pinch through its hysteresis band, then releases immediately for a fully open palm',()=>{
     const e=new GestureEngine();settle(e,[hand(.5,1,.25)]);
     settle(e,[hand(.5,1,.40)],330);expect(e.frame.hands[0].mode).toBe('pinch');
-    e.update([hand(.5,1,.6)],660,1,1);expect(e.frame.hands[0].mode).toBe('pinch');
+    e.update([hand(.5,1,.6)],660,1,1);expect(e.frame.hands[0].mode).toBe('open');
     settle(e,[hand(.5,1,.6)],690);expect(e.frame.hands[0].mode).toBe('open');
+  });
+  it('keeps the stability window for a partially extended palm after pinch',()=>{
+    const e=new GestureEngine();settle(e,[hand(.5,1,.2)]);
+    const partial=hand(.5,1,.6);for(const i of [8,12,16,20])partial.landmarks[i].y=.436;
+    expect(measure(partial.landmarks).openness).toBeLessThan(GESTURE.fastOpenEnter);
+    e.update([partial],330,1,1);expect(e.frame.hands[0].mode).toBe('pinch');
   });
   it('does not switch for a brief pinch flicker',()=>{
     const e=new GestureEngine();settle(e,[hand()]);e.update([hand(.5,1,.2)],330,1,1);e.update([hand()],360,1,1);expect(e.frame.hands[0].mode).toBe('open');
@@ -56,9 +62,9 @@ describe('gesture state and arbitration',()=>{
   });
   it('fades lost tracking and clears stale pinch before reacquisition',()=>{
     const e=new GestureEngine();settle(e,[hand(.5,1,.2)]);const id=e.frame.hands[0].id;
-    e.update([],600,1,1);e.tick(.03,600);expect(e.frame.hands[0].weight).toBeGreaterThan(0);expect(e.frame.hands[0].mode).toBe('trail');
-    e.update([hand()],630,1,1);const fresh=e.frame.hands.find(h=>h.lastSeen===630)!;expect(fresh.id).not.toBe(id);expect(fresh.mode).toBe('trail');
-    for(let t=660;t<1700;t+=30)e.tick(.03,t);expect(e.frame.hands).toHaveLength(0);
+    e.update([],1200,1,1);e.tick(.03,1200);expect(e.frame.hands[0].weight).toBeGreaterThan(0);expect(e.frame.hands[0].mode).toBe('trail');
+    e.update([hand()],1230,1,1);const fresh=e.frame.hands.find(h=>h.lastSeen===1230)!;expect(fresh.id).not.toBe(id);expect(fresh.mode).toBe('open');
+    for(let t=1260;t<3200;t+=30)e.tick(.03,t);expect(e.frame.hands).toHaveLength(0);
   });
   it('emits directional swipes with a cooldown and suppresses pinching swipes',()=>{
     const e=new GestureEngine();settle(e,[hand(.7)]);
@@ -69,5 +75,43 @@ describe('gesture state and arbitration',()=>{
     expect(e.update([hand(.25,1,.2)],730,1,1).waves).toHaveLength(0);
     // A new deliberate swipe after the cooldown may fire again.
     settle(e,[hand(.6)],1000);expect(e.update([hand(.32)],1330,1,1).waves).toHaveLength(1);
+  });
+});
+describe('closed palm and dropped tracking frames',()=>{
+  it('recognizes a closed palm independently of thumb/index pinch',()=>{
+    const e=new GestureEngine(),d=hand();
+    for(const tip of [8,12,16,20])d.landmarks[tip]={...d.landmarks[tip-3],y:.76};
+    d.landmarks[4]={x:.25,y:.55};
+    settle(e,[d]);expect(e.frame.hands[0].mode).toBe('closed');
+    e.update([hand()],330,1,1);expect(e.frame.hands[0].mode).toBe('open');
+  });
+  it('preserves an open gesture across a short missing frame and assigns a new identity after real loss',()=>{
+    const e=new GestureEngine();settle(e,[hand()]);const id=e.frame.hands[0].id;
+    e.update([],330,1,1);e.tick(.03,330);e.update([hand()],390,1,1);
+    expect(e.frame.hands[0].id).toBe(id);expect(e.frame.hands[0].mode).toBe('open');
+    e.tick(.03,1600);e.update([hand()],1630,1,1);
+    const current=e.frame.hands.find(h=>h.lastSeen===1630)!;expect(current.id).not.toBe(id);expect(current.mode).toBe('open');
+  });
+});
+describe('release events at slow inference rates',()=>{
+  it('keeps hand identity and confirmed pinch at 5 Hz even with one dropped inference frame',()=>{
+    const e=new GestureEngine();let now=0,id=0;
+    for(let frame=0;frame<8;frame++){
+      if(frame!==5){e.update([hand(.5,1,.2)],now,1,1);id ||= e.frame.hands[0].id;expect(e.frame.hands.filter(h=>e.isPresent(h,now)).map(h=>h.id)).toEqual([id]);}
+      for(let i=0;i<12;i++){now+=1000/60;e.tick(1/60,now);}
+    }
+    expect(e.frame.hands[0].mode).toBe('pinch');
+    const open=hand();open.landmarks[20]={...open.landmarks[17],y:.76};
+    expect(measure(open.landmarks).openness).toBeCloseTo(.75);
+    e.update([open],now,1,1);expect(e.frame.hands[0].id).toBe(id);expect(e.frame.hands[0].mode).toBe('open');expect(e.frame.hands[0].releaseSerial).toBe(1);
+    e.update([open],now+200,1,1);expect(e.frame.hands[0].releaseSerial).toBe(1);
+  });
+  it('preserves a confirmed release through an intermediate hand pose, but disarms on true tracking loss',()=>{
+    const e=new GestureEngine();settle(e,[hand(.5,1,.2)]);
+    const partial=hand();for(const i of [8,12,16,20])partial.landmarks[i].y=.455;
+    settle(e,[partial],330);expect(e.frame.hands[0].mode).toBe('trail');
+    e.update([hand()],660,1,1);expect(e.frame.hands[0].releaseSerial).toBe(1);
+    settle(e,[hand(.5,1,.2)],690);e.tick(.03,2000);
+    e.update([hand()],2030,1,1);expect(e.frame.hands.find(h=>h.lastSeen===2030)!.releaseSerial).toBe(0);
   });
 });

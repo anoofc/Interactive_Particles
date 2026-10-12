@@ -1,7 +1,7 @@
 import type { HandLandmarker, HandLandmarkerResult } from '@mediapipe/tasks-vision';
 export class HandTracking {
   private initTimer=0;private worker?:Worker;private tracker?:HandLandmarker;private timer=0;private busy=false;private lastVideo=-1;private disposed=false;private initReject?: (e:Error)=>void;
-  rate=0;backend='';private lastResult=0;
+  rate=0;latency=0;backend='';private lastResult=0;
   constructor(private video:HTMLVideoElement,private onResult:(r:HandLandmarkerResult,time:number)=>void,private onError:(e:Error)=>void){}
   async init(){
     const wasm=new URL(`${import.meta.env.BASE_URL}wasm/`,location.href).href;
@@ -37,7 +37,12 @@ export class HandTracking {
     }
   }
   start(){this.timer=window.setInterval(()=>{void this.infer();},this.worker?33:50);}
-  private result(r:HandLandmarkerResult,time:number){const now=performance.now();this.rate=this.lastResult?this.rate*.7+1000/(now-this.lastResult)*.3:0;this.lastResult=now;this.onResult(r,time);}
+  private result(r:HandLandmarkerResult,time:number){
+    const now=performance.now();this.latency=Math.max(0,now-time);
+    this.rate=this.lastResult?this.rate*.7+1000/(now-this.lastResult)*.3:0;this.lastResult=now;
+    // Capture timestamps belong to detectForVideo. State freshness begins on delivery.
+    this.onResult(r,now);
+  }
   private async infer(){
     if(this.disposed||document.hidden||this.busy||this.video.readyState<2||this.video.currentTime===this.lastVideo)return;
     this.lastVideo=this.video.currentTime;this.busy=true;const timestamp=performance.now();

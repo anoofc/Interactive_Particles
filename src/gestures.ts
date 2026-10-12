@@ -1,12 +1,15 @@
 import { GESTURE as C } from './config';
 export interface Point {x:number; y:number; z?:number}
-export type Mode = 'trail'|'pinch'|'open';
+export type Mode = 'trail'|'pinch'|'closed'|'open';
 export interface Detection {landmarks:Point[]; label:string; confidence:number}
 export interface Hand {
   id:number; x:number; y:number; index:Point; thumb:Point; pinchPoint:Point;
   vx:number; vy:number; openness:number; pinch:number; mode:Mode;
   confidence:number; label:string; lastSeen:number; weight:number;
   candidate:Mode; candidateSince:number; lastSwipe:number;
+  /** Webcam releases are explicit, monotonically numbered events, not render-frame guesses. */
+  releaseSerial?:number; releaseCentre?:Point;
+  gatherOrigin?:Point & {time:number};
 }
 export interface Wave {x:number;y:number;dx:number;dy:number;strength:number;age:number}
 export interface GestureFrame {hands:Hand[]; waves:Wave[]; two:{active:boolean;weight:number;x:number;y:number;scale:number}}
@@ -22,15 +25,17 @@ export function measure(points:Point[],aspect=1) {
   for(const i of [0,5,9,13,17]) {palm.x+=points[i].x/5;palm.y+=points[i].y/5;}
   const size=Math.max(0.015,(distance(points[0],points[9],aspect)+distance(points[5],points[17],aspect))/2);
   const ratio=distance(points[4],points[8],aspect)/size;
-  let openness=0;
+  let openness=0,extendedFingers=0,indexExtended=false;
   for(const [tip,pip,mcp] of [[8,6,5],[12,10,9],[16,14,13],[20,18,17]]) {
     // A straight finger has a tip well beyond its PIP and a nearly straight joint.
     const a=distance(points[mcp],points[pip],aspect),b=distance(points[pip],points[tip],aspect);
     const straight=distance(points[mcp],points[tip],aspect)/Math.max(0.001,a+b);
     const reach=distance(points[tip],points[0],aspect)/Math.max(0.001,distance(points[pip],points[0],aspect));
-    openness+=clamp((straight-0.72)/0.25)*clamp((reach-1.05)/0.32)/4;
+    const score=clamp((straight-0.72)/0.25)*clamp((reach-1.05)/0.32);
+    openness+=score/4;if(score>=C.openFingerScore)extendedFingers++;
+    if(tip===8)indexExtended=score>=C.openFingerScore;
   }
-  return {palm,size,ratio,pinch:clamp(1-ratio/0.65),openness};
+  return {palm,size,ratio,pinch:clamp(1-ratio/0.65),openness,extendedFingers,indexExtended};
 }
 export class GestureEngine {
   frame:GestureFrame={hands:[],waves:[],two:{active:false,weight:0,x:.5,y:.5,scale:1}};
@@ -39,12 +44,16 @@ export class GestureEngine {
   private baseScale=1;
   private pair='';
   private lastTime=0;
-  reset() {this.frame.hands=[];this.frame.waves=[];this.frame.two.active=false;this.frame.two.weight=0;this.frame.two.scale=1;this.frame.two.x=.5;this.frame.two.y=.5;this.baseline=0;this.pair='';this.lastTime=0;}
+  private frameIntervalMs=33;
+  get lossTimeoutMs(){return clamp(this.frameIntervalMs*3,C.lostMs,C.maxLostMs);}
+  isPresent(hand:Hand,now:number){return now-hand.lastSeen<this.lossTimeoutMs;}
+  reset() {this.frame.hands=[];this.frame.waves=[];this.frame.two.active=false;this.frame.two.weight=0;this.frame.two.scale=1;this.frame.two.x=.5;this.frame.two.y=.5;this.baseline=0;this.pair='';this.lastTime=0;this.frameIntervalMs=33;}
   update(detections:Detection[],now:number,videoAspect=4/3,viewportAspect=16/9) {
+    if(this.lastTime>0){const interval=now-this.lastTime;if(interval>0&&interval<C.maxLostMs)this.frameIntervalMs+=(interval-this.frameIntervalMs)*.35;}
     const dt=clamp((now-this.lastTime)/1000,.008,.1);this.lastTime=now;
     const alpha=1-Math.exp(-dt/C.smoothingSeconds);
     // Never reuse stale identities or gestures after tracking loss.
-    this.frame.hands=this.frame.hands.filter(h=>now-h.lastSeen<C.lostMs||h.weight>.015);
+    this.frame.hands=this.frame.hands.filter(h=>this.isPresent(h,now)||h.weight>.015);
     const measurements=detections.slice(0,2).map(d=>({d,m:measure(d.landmarks,videoAspect),p:mapPoint(measure(d.landmarks,videoAspect).palm,videoAspect,viewportAspect)}));
     const old=this.frame.hands;
     // Globally compare the two permutations: detection order is not hand identity.
@@ -52,15 +61,15 @@ export class GestureEngine {
     const visit=(i:number,used:Set<number>,indices:number[],cost:number)=>{
       if(i===measurements.length) {if(cost<best){best=cost;assignment=indices.slice();}return;}
       visit(i+1,used,[...indices,-1],cost+C.matchDistance);
-      old.forEach((h,j)=>{if(used.has(j)||now-h.lastSeen>=C.lostMs)return;const p=measurements[i].p;const d=Math.hypot(h.x-p.x,h.y-p.y)+(h.label!==measurements[i].d.label?0.025:0);if(d<C.matchDistance){used.add(j);visit(i+1,used,[...indices,j],cost+d);used.delete(j);}});
+      old.forEach((h,j)=>{if(used.has(j)||!this.isPresent(h,now))return;const p=measurements[i].p;const d=Math.hypot(h.x-p.x,h.y-p.y)+(h.label!==measurements[i].d.label?0.025:0);if(d<C.matchDistance){used.add(j);visit(i+1,used,[...indices,j],cost+d);used.delete(j);}});
     };
     visit(0,new Set(),[],0);
     this.frame.waves=[];
     measurements.forEach(({d,m,p},i)=>{
       let h=assignment[i]>=0?old[assignment[i]]:undefined;
       const fresh=!h;
-      if(!h) {h={id:this.nextId++,x:p.x,y:p.y,index:p,thumb:p,pinchPoint:p,vx:0,vy:0,openness:m.openness,pinch:m.pinch,mode:'trail',confidence:d.confidence,label:d.label,lastSeen:now,weight:0,candidate:'trail',candidateSince:now,lastSwipe:-Infinity};old.push(h);}
-      const step=clamp((now-h.lastSeen)/1000,.015,.12);
+      if(!h) {h={id:this.nextId++,x:p.x,y:p.y,index:p,thumb:p,pinchPoint:p,vx:0,vy:0,openness:m.openness,pinch:m.pinch,mode:'trail',confidence:d.confidence,label:d.label,lastSeen:now,weight:0,candidate:'trail',candidateSince:now,lastSwipe:-Infinity,releaseSerial:0};old.push(h);}
+      const step=clamp((now-h.lastSeen)/1000,.015,.9);
       const nx=h.x+(p.x-h.x)*alpha,ny=h.y+(p.y-h.y)*alpha;
       h.vx=fresh?0:h.vx+(clamp((nx-h.x)/step,-5,5)-h.vx)*.6;
       h.vy=fresh?0:h.vy+(clamp((ny-h.y)/step,-5,5)-h.vy)*.6;
@@ -71,13 +80,23 @@ export class GestureEngine {
       h.thumb={x:h.thumb.x+(thumb.x-h.thumb.x)*alpha,y:h.thumb.y+(thumb.y-h.thumb.y)*alpha};
       h.pinchPoint={x:(h.index.x+h.thumb.x)/2,y:(h.index.y+h.thumb.y)/2};
       const pinch=m.ratio<(h.mode==='pinch'?C.pinchExit:C.pinchEnter);
-      const fastOpen=!pinch&&m.openness>=C.fastOpenEnter;
+      const fastOpen=!pinch&&(m.openness>=C.fastOpenEnter||(m.extendedFingers>=3&&m.indexExtended&&m.openness>=C.openFingerMean));
       const open=fastOpen||h.openness>(h.mode==='open'?C.openExit:C.openEnter);
-      const desired:Mode=pinch?'pinch':open?'open':'trail';
+      const closed=h.openness<(h.mode==='closed'?C.closedExit:C.closedEnter);
+      const desired:Mode=pinch?'pinch':open?'open':closed?'closed':'trail';
       if(h.candidate!==desired){h.candidate=desired;h.candidateSince=now;}
       if(fastOpen||now-h.candidateSince>=C.stabilityMs)h.mode=desired;
+      if(h.mode==='pinch'||h.mode==='closed'){
+        const point=h.mode==='pinch'?h.pinchPoint:h;
+        // Only confirmed gathering samples arm release; an intermediate pose cannot re-arm it.
+        if(desired===h.mode)h.gatherOrigin={x:point.x,y:point.y,time:now};
+      }else if(h.mode==='open'&&h.gatherOrigin){
+        if(now-h.gatherOrigin.time<C.releaseWindowMs){h.releaseSerial=(h.releaseSerial??0)+1;h.releaseCentre={x:h.gatherOrigin.x,y:h.gatherOrigin.y};}
+        h.gatherOrigin=undefined;
+      }
+      if(h.gatherOrigin&&now-h.gatherOrigin.time>=C.releaseWindowMs)h.gatherOrigin=undefined;
       const speed=Math.hypot(h.vx,h.vy);
-      if(h.mode!=='pinch'&&!pinch&&speed>C.swipeSpeed&&now-h.lastSwipe>C.swipeCooldownMs) {
+      if(h.mode!=='pinch'&&h.mode!=='closed'&&!pinch&&!closed&&speed>C.swipeSpeed&&now-h.lastSwipe>C.swipeCooldownMs) {
         this.frame.waves.push({x:h.x,y:h.y,dx:h.vx/speed,dy:h.vy/speed,strength:clamp(speed/C.swipeSpeed,1,3),age:0});h.lastSwipe=now;
       }
     });
@@ -95,9 +114,9 @@ export class GestureEngine {
     return this.frame;
   }
   tick(dt:number,now:number) {
-    const two=this.frame.two;if(two.active&&this.frame.hands.filter(h=>now-h.lastSeen<C.lostMs&&h.mode==='open').length!==2)two.active=false;two.weight+=((two.active?1:0)-two.weight)*(1-Math.exp(-dt*8));
+    const two=this.frame.two;if(two.active&&this.frame.hands.filter(h=>this.isPresent(h,now)&&h.mode==='open').length!==2)two.active=false;two.weight+=((two.active?1:0)-two.weight)*(1-Math.exp(-dt*8));
     if(!two.active)two.scale+=(1-two.scale)*(1-Math.exp(-dt*1.3));
-    for(const h of this.frame.hands){const present=now-h.lastSeen<C.lostMs;h.weight+=((present?1:0)-h.weight)*(1-Math.exp(-dt*(present?12:7)));if(!present){h.mode='trail';h.vx*=.9;h.vy*=.9;}}
-    this.frame.hands=this.frame.hands.filter(h=>now-h.lastSeen<C.lostMs||h.weight>.015);
+    for(const h of this.frame.hands){const present=this.isPresent(h,now);h.weight+=((present?1:0)-h.weight)*(1-Math.exp(-dt*(present?12:7)));if(!present){h.mode='trail';h.gatherOrigin=undefined;h.vx*=.9;h.vy*=.9;}}
+    this.frame.hands=this.frame.hands.filter(h=>this.isPresent(h,now)||h.weight>.015);
   }
 }
